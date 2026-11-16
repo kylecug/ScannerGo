@@ -12,6 +12,8 @@
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, copy) NSString *lastValue;
 @property (nonatomic, strong) NSDate *lastTime;
+@property (nonatomic, strong) UIButton *openButton;
+@property (nonatomic, strong) NSURL *pendingURL;
 @end
 
 static NSString *const kSavedTextKey = @"ScannedText";
@@ -20,7 +22,7 @@ static NSString *const kSavedTextKey = @"ScannedText";
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"扫码";
+    self.title = @"scannerGo";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.sessionQueue = dispatch_queue_create("scanner.session", DISPATCH_QUEUE_SERIAL);
 
@@ -41,6 +43,18 @@ static NSString *const kSavedTextKey = @"ScannedText";
     self.statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.previewView addSubview:self.statusLabel];
+
+    // 识别到网址时出现的"打开链接"按钮（不会自动打开，要自己点）
+    self.openButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.openButton setTitle:@"  打开链接  " forState:UIControlStateNormal];
+    [self.openButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.openButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    self.openButton.backgroundColor = [UIColor systemBlueColor];
+    self.openButton.layer.cornerRadius = 16;
+    self.openButton.hidden = YES;
+    self.openButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.openButton addTarget:self action:@selector(openLink) forControlEvents:UIControlEventTouchUpInside];
+    [self.previewView addSubview:self.openButton];
 
     // 结果文本框
     self.textView = [UITextView new];
@@ -74,6 +88,10 @@ static NSString *const kSavedTextKey = @"ScannedText";
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor],
         [self.statusLabel.bottomAnchor constraintEqualToAnchor:self.previewView.bottomAnchor],
         [self.statusLabel.heightAnchor constraintGreaterThanOrEqualToConstant:32],
+
+        [self.openButton.topAnchor constraintEqualToAnchor:self.previewView.topAnchor constant:12],
+        [self.openButton.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor constant:-12],
+        [self.openButton.heightAnchor constraintEqualToConstant:32],
 
         [self.textView.topAnchor constraintEqualToAnchor:self.previewView.bottomAnchor constant:12],
         [self.textView.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor],
@@ -192,6 +210,7 @@ static NSString *const kSavedTextKey = @"ScannedText";
     [self saveText];
 
     [self showStatus:[NSString stringWithFormat:@"已识别：%@", value]];
+    [self updateOpenButtonFor:value];
     [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
 
     // 预览闪一下绿框
@@ -211,6 +230,7 @@ static NSString *const kSavedTextKey = @"ScannedText";
 - (void)clearText {
     self.textView.text = @"";
     self.lastValue = nil;
+    [self updateOpenButtonFor:@""];
     [self saveText];
     [self showStatus:@"已清空，对准二维码 / 条形码"];
 }
@@ -218,6 +238,28 @@ static NSString *const kSavedTextKey = @"ScannedText";
 - (void)copyText {
     [UIPasteboard generalPasteboard].string = self.textView.text;
     [self showStatus:@"已复制到剪贴板"];
+}
+
+- (void)updateOpenButtonFor:(NSString *)value {
+    NSString *trimmed = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSURL *url = [NSURL URLWithString:trimmed];
+    NSString *scheme = url.scheme.lowercaseString;
+    BOOL isWeb = url.host.length > 0 && ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]);
+    self.pendingURL = isWeb ? url : nil;
+    self.openButton.hidden = !isWeb;
+}
+
+- (void)openLink {
+    NSURL *url = self.pendingURL;
+    if (!url) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"打开这个链接？"
+                                                               message:url.absoluteString
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"打开" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)dismissKeyboard {

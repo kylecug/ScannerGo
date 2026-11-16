@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
-	<key>CFBundleDisplayName</key><string>扫码Long</string>
-	<key>CFBundleExecutable</key><string>HelloWorldLong</string>
-	<key>CFBundleIdentifier</key><string>com.long.helloworld</string>
+	<key>CFBundleDisplayName</key><string>scannerGo</string>
+	<key>CFBundleExecutable</key><string>scannerGo</string>
+	<key>CFBundleIdentifier</key><string>com.kylecug.scannergo</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleName</key><string>HelloWorldLong</string>
+	<key>CFBundleName</key><string>scannerGo</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>1.0</string>
 	<key>CFBundleVersion</key><string>1</string>

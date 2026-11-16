@@ -1,0 +1,45 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang + lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld zip
+
+      - name: Cache iOS SDK
+        uses: actions/cache@v4
+        with:
+          path: .sdk
+          key: ios-sdk-16.5
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scannerGo-ipa
+          path: scannerGo.ipa
+
+      - name: Publish "latest" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest scannerGo.ipa \
+            --title "scannerGo (latest)" \
+            --notes "自动构建自 ${GITHUB_SHA::7}，下载 scannerGo.ipa 导入 LiveContainer 即可。" \
+            --prerelease --target "$GITHUB_SHA"
