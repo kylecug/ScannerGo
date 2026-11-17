@@ -1,8 +1,9 @@
 name: Build IPA
 
 # push 到 main      → 编译并覆盖 "latest" 预览版
-# push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z，并更新 source.json（LiveContainer 源）
-# 手动运行            → 同 main，并重新生成 source.json
+# push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z
+#                      （kylecug/ipa-release 每小时会把正式版搬过去并更新 LiveContainer 源）
+# 手动运行            → 同 main
 on:
   push:
     branches: [main]
@@ -69,7 +70,3 @@ jobs:
               --title "scannerGo ${GITHUB_REF_NAME}" --generate-notes --latest
           fi
 
-  source:
-    needs: build
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/source.yml
