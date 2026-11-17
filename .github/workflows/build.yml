@@ -1,13 +1,21 @@
 name: Build IPA
 
+# push 到 main      → 编译并覆盖 "latest" 预览版
+# push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z，并更新 source.json（LiveContainer 源）
+# 手动运行            → 同 main，并重新生成 source.json
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -25,7 +33,11 @@ jobs:
           key: ios-sdk-16.5
 
       - name: Build
-        run: ./build.sh
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./build.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -33,13 +45,31 @@ jobs:
           name: scannerGo-ipa
           path: scannerGo.ipa
 
-      - name: Publish "latest" release
-        if: github.event_name != 'pull_request'
+      - name: Publish "latest" pre-release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest scannerGo.ipa \
             --title "scannerGo (latest)" \
-            --notes "自动构建自 ${GITHUB_SHA::7}，下载 scannerGo.ipa 导入 LiveContainer 即可。" \
+            --notes "自动构建自 ${GITHUB_SHA::7}，开发预览版。正式版请看带版本号的 release。" \
             --prerelease --target "$GITHUB_SHA"
+
+      - name: Publish versioned release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp scannerGo.ipa "scannerGo-${GITHUB_REF_NAME}.ipa"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "scannerGo-${GITHUB_REF_NAME}.ipa" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "scannerGo-${GITHUB_REF_NAME}.ipa" \
+              --title "scannerGo ${GITHUB_REF_NAME}" --generate-notes --latest
+          fi
+
+  source:
+    needs: build
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/source.yml
