@@ -3,13 +3,18 @@ name: Build IPA
 # push 到 main      → 编译并覆盖 "latest" 预览版
 # push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z
 #                      （kylecug/ipa-release 每小时会把正式版搬过去并更新 LiveContainer 源）
-# 手动运行            → 同 main
+# 手动运行            → 填了版本号就发正式版 v<版本号>（自动打 tag），不填就同 main
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号，例如 1.1.0（留空 = 只更新 latest 预览版）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -33,12 +38,27 @@ jobs:
           path: .sdk
           key: ios-sdk-16.5
 
-      - name: Build
+      - name: Work out version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            export VERSION="${GITHUB_REF_NAME#v}"
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${INPUT_VERSION#v}"
           fi
-          ./build.sh
+          if [ -n "$v" ] && ! [[ "$v" =~ ^[0-9]+(\.[0-9]+){0,3}$ ]]; then
+            echo "版本号格式不对: $v（要类似 1.2.0）"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=${v:+v$v}" >> "$GITHUB_OUTPUT"
+          echo "版本: ${v:-（预览版）}"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: ./build.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -47,7 +67,7 @@ jobs:
           path: scannerGo.ipa
 
       - name: Publish "latest" pre-release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.ver.outputs.tag == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -58,15 +78,17 @@ jobs:
             --prerelease --target "$GITHUB_SHA"
 
       - name: Publish versioned release
-        if: github.ref_type == 'tag'
+        if: steps.ver.outputs.tag != '' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          cp scannerGo.ipa "scannerGo-${GITHUB_REF_NAME}.ipa"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "scannerGo-${GITHUB_REF_NAME}.ipa" --clobber
+          cp scannerGo.ipa "scannerGo-${TAG}.ipa"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "scannerGo-${TAG}.ipa" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "scannerGo-${GITHUB_REF_NAME}.ipa" \
-              --title "scannerGo ${GITHUB_REF_NAME}" --generate-notes --latest
+            # tag 不存在时 gh 会在当前 commit 上自动打 tag
+            gh release create "$TAG" "scannerGo-${TAG}.ipa" --target "$GITHUB_SHA" \
+              --title "scannerGo ${TAG}" --generate-notes --latest
           fi
 

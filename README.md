@@ -34,9 +34,10 @@ https://raw.githubusercontent.com/kylecug/ipa-release/main/ipa/source.json
 
 ## 发布新版本
 
-```bash
-git tag v1.1.0 && git push origin v1.1.0
-```
+两种方式任选：
+
+- **网页 / 手机上点按钮**：仓库 → Actions → **Build IPA** → Run workflow，填版本号（如 `1.1.0`）→ Run
+- **命令行**：`git tag v1.1.0 && git push origin v1.1.0`
 
 GitHub Actions 会自动编译（版本号写进 App）并发布 release `v1.1.0`（附 `scannerGo-v1.1.0.ipa`，自动生成更新说明）。
 `ipa-release` 每小时同步一次，把它搬过去并更新源；想立刻同步就去 ipa-release 的 Actions 手动运行 **Sync IPA**。
