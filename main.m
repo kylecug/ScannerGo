@@ -146,11 +146,15 @@ static NSString *const kSavedTextKey = @"ScannedText";
 }
 
 - (void)setupSession {
-    // 用后置广角主摄（Apple 扫码示例同款），找不到再退回默认摄像头
-    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                                                 mediaType:AVMediaTypeVideo
-                                                                  position:AVCaptureDevicePositionBack]
-                              ?: [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    // 优先用带超广角的虚拟镜头（Pro 机型三摄 / 双广角），凑近时系统会像相机 App 一样自动切微距；
+    // 没有的话用广角主摄，找不到再退回默认摄像头
+    AVCaptureDeviceDiscoverySession *ds = [AVCaptureDeviceDiscoverySession
+        discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInTripleCamera,
+                                          AVCaptureDeviceTypeBuiltInDualWideCamera,
+                                          AVCaptureDeviceTypeBuiltInWideAngleCamera]
+                              mediaType:AVMediaTypeVideo
+                               position:AVCaptureDevicePositionBack];
+    AVCaptureDevice *device = ds.devices.firstObject ?: [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
     NSError *err = nil;
     AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:&err] : nil;
     if (!input) { [self showStatus:[NSString stringWithFormat:@"打不开摄像头：%@", err.localizedDescription ?: @"无设备"]]; return; }
@@ -200,11 +204,24 @@ static const float kMinCodeSizeMM = 20.0f;
     if ([d isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) d.exposureMode = AVCaptureExposureModeContinuousAutoExposure;
     if (d.isExposurePointOfInterestSupported) d.exposurePointOfInterest = CGPointMake(0.5, 0.5);
 
-    // 新款 iPhone 主摄最近对焦距离比较远（十几厘米），贴近就糊。
-    // 按 Apple 的做法自动放大一点：人站在最近对焦距离之外，码在画面里也够大。
+    BOOL macro = NO;
+    NSArray<NSNumber *> *switchOver = d.virtualDeviceSwitchOverVideoZoomFactors;
+    if (d.isVirtualDevice && switchOver.count > 0) {
+        // 虚拟镜头：zoom 1.0 是超广角，第一个切换点就是"1x 主摄"视角。
+        // 停在这里，凑近对不上焦时系统自动切到超广角微距（15 Pro / Pro Max 最近约 2cm）。
+        if (@available(iOS 15.0, *)) {
+            [d setPrimaryConstituentDeviceSwitchingBehavior:AVCapturePrimaryConstituentDeviceSwitchingBehaviorAuto
+                             restrictedSwitchingBehaviorConditions:AVCapturePrimaryConstituentDeviceRestrictedSwitchingBehaviorConditionNone];
+        }
+        d.videoZoomFactor = MIN(switchOver.firstObject.doubleValue, d.activeFormat.videoMaxZoomFactor);
+        macro = YES;
+    }
+
+    // 没有超广角的机型：主摄最近对焦距离比较远（十几厘米），贴近就糊。
+    // 按 Apple 扫码示例的做法自动放大一点：人站在最近对焦距离之外，码在画面里也够大。
     NSInteger minFocusMM = d.minimumFocusDistance; // iOS 15+，单位毫米，-1 表示未知
     float fov = d.activeFormat.videoFieldOfView;
-    if (minFocusMM > 0 && fov > 0) {
+    if (!macro && minFocusMM > 0 && fov > 0) {
         float halfRad = (fov / 2.0f) * (float)M_PI / 180.0f;
         float minSubjectMM = (kMinCodeSizeMM / kPreviewFill) / tanf(halfRad);
         if (minSubjectMM < minFocusMM) {
@@ -215,9 +232,12 @@ static const float kMinCodeSizeMM = 20.0f;
     }
     [d unlockForConfiguration];
 
+    CGFloat zoomNow = d.videoZoomFactor;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (d.videoZoomFactor > 1.01) {
-            [self showStatus:[NSString stringWithFormat:@"已自动放大 %.1fx，离远一点更清楚（点画面可对焦）", d.videoZoomFactor]];
+        if (macro) {
+            [self showStatus:@"凑近会自动切微距镜头（点画面可对焦）"];
+        } else if (zoomNow > 1.01) {
+            [self showStatus:[NSString stringWithFormat:@"已自动放大 %.1fx，离远一点更清楚（点画面可对焦）", zoomNow]];
         } else {
             [self showStatus:@"对准二维码 / 条形码（点画面可对焦）"];
         }
