@@ -14,6 +14,8 @@
 @property (nonatomic, strong) NSDate *lastTime;
 @property (nonatomic, strong) UIButton *openButton;
 @property (nonatomic, strong) NSURL *pendingURL;
+@property (nonatomic, strong) AVCaptureDevice *device;
+@property (nonatomic, strong) UIView *focusBox;
 @end
 
 static NSString *const kSavedTextKey = @"ScannedText";
@@ -55,6 +57,15 @@ static NSString *const kSavedTextKey = @"ScannedText";
     self.openButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.openButton addTarget:self action:@selector(openLink) forControlEvents:UIControlEventTouchUpInside];
     [self.previewView addSubview:self.openButton];
+
+    // 点画面对焦
+    self.focusBox = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 72, 72)];
+    self.focusBox.layer.borderColor = [UIColor systemYellowColor].CGColor;
+    self.focusBox.layer.borderWidth = 2;
+    self.focusBox.alpha = 0;
+    self.focusBox.userInteractionEnabled = NO;
+    [self.previewView addSubview:self.focusBox];
+    [self.previewView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTapToFocus:)]];
 
     // 结果文本框
     self.textView = [UITextView new];
@@ -135,7 +146,11 @@ static NSString *const kSavedTextKey = @"ScannedText";
 }
 
 - (void)setupSession {
-    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    // 用后置广角主摄（Apple 扫码示例同款），找不到再退回默认摄像头
+    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                                                 mediaType:AVMediaTypeVideo
+                                                                  position:AVCaptureDevicePositionBack]
+                              ?: [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
     NSError *err = nil;
     AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:&err] : nil;
     if (!input) { [self showStatus:[NSString stringWithFormat:@"打不开摄像头：%@", err.localizedDescription ?: @"无设备"]]; return; }
@@ -159,11 +174,81 @@ static NSString *const kSavedTextKey = @"ScannedText";
     output.metadataObjectTypes = types;
 
     self.session = session;
+    self.device = device;
+    [self configureFocusForDevice:device];
     self.previewLayer = [AVCaptureVideoPreviewLayer layerWithSession:session];
     self.previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     self.previewLayer.frame = self.previewView.bounds;
     [self.previewView.layer insertSublayer:self.previewLayer atIndex:0];
     [self startSession];
+}
+
+#pragma mark 对焦
+
+// 码在画面里大概占多宽（0~1），以及要能扫到的最小码宽（毫米）
+static const float kPreviewFill = 0.6f;
+static const float kMinCodeSizeMM = 20.0f;
+
+- (void)configureFocusForDevice:(AVCaptureDevice *)d {
+    NSError *err = nil;
+    if (![d lockForConfiguration:&err]) return;
+
+    if ([d isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) d.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+    if (d.isAutoFocusRangeRestrictionSupported) d.autoFocusRangeRestriction = AVCaptureAutoFocusRangeRestrictionNear; // 优先近距离
+    if (d.isSmoothAutoFocusSupported) d.smoothAutoFocusEnabled = NO;                                              // 对焦快一点
+    if (d.isFocusPointOfInterestSupported) d.focusPointOfInterest = CGPointMake(0.5, 0.5);
+    if ([d isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) d.exposureMode = AVCaptureExposureModeContinuousAutoExposure;
+    if (d.isExposurePointOfInterestSupported) d.exposurePointOfInterest = CGPointMake(0.5, 0.5);
+
+    // 新款 iPhone 主摄最近对焦距离比较远（十几厘米），贴近就糊。
+    // 按 Apple 的做法自动放大一点：人站在最近对焦距离之外，码在画面里也够大。
+    NSInteger minFocusMM = d.minimumFocusDistance; // iOS 15+，单位毫米，-1 表示未知
+    float fov = d.activeFormat.videoFieldOfView;
+    if (minFocusMM > 0 && fov > 0) {
+        float halfRad = (fov / 2.0f) * (float)M_PI / 180.0f;
+        float minSubjectMM = (kMinCodeSizeMM / kPreviewFill) / tanf(halfRad);
+        if (minSubjectMM < minFocusMM) {
+            CGFloat zoom = MIN((CGFloat)(minFocusMM / minSubjectMM), d.activeFormat.videoMaxZoomFactor);
+            zoom = MIN(zoom, 4.0);
+            if (zoom > 1.0) d.videoZoomFactor = zoom;
+        }
+    }
+    [d unlockForConfiguration];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (d.videoZoomFactor > 1.01) {
+            [self showStatus:[NSString stringWithFormat:@"已自动放大 %.1fx，离远一点更清楚（点画面可对焦）", d.videoZoomFactor]];
+        } else {
+            [self showStatus:@"对准二维码 / 条形码（点画面可对焦）"];
+        }
+    });
+}
+
+- (void)handleTapToFocus:(UITapGestureRecognizer *)g {
+    AVCaptureDevice *d = self.device;
+    if (!d || !self.previewLayer) return;
+    CGPoint viewPoint = [g locationInView:self.previewView];
+    CGPoint devPoint = [self.previewLayer captureDevicePointOfInterestForPoint:viewPoint];
+    dispatch_async(self.sessionQueue, ^{
+        NSError *err = nil;
+        if (![d lockForConfiguration:&err]) return;
+        if (d.isFocusPointOfInterestSupported) d.focusPointOfInterest = devPoint;
+        if ([d isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) d.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+        else if ([d isFocusModeSupported:AVCaptureFocusModeAutoFocus]) d.focusMode = AVCaptureFocusModeAutoFocus;
+        if (d.isExposurePointOfInterestSupported) d.exposurePointOfInterest = devPoint;
+        if ([d isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) d.exposureMode = AVCaptureExposureModeContinuousAutoExposure;
+        [d unlockForConfiguration];
+    });
+
+    // 画个对焦框
+    self.focusBox.center = viewPoint;
+    self.focusBox.transform = CGAffineTransformMakeScale(1.4, 1.4);
+    self.focusBox.alpha = 1;
+    [UIView animateWithDuration:0.25 animations:^{
+        self.focusBox.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL done) {
+        [UIView animateWithDuration:0.3 delay:0.6 options:0 animations:^{ self.focusBox.alpha = 0; } completion:nil];
+    }];
 }
 
 - (void)startSession {

@@ -20,7 +20,7 @@ fi
 rm -rf build "$APP.ipa" && mkdir -p "build/Payload/$APP.app"
 clang -target arm64-apple-ios15.0 -isysroot "$SDK" -fobjc-arc -O2 -Wall \
   -fuse-ld=lld -Wl,-adhoc_codesign \
-  -framework UIKit -framework Foundation -framework AVFoundation \
+  -framework UIKit -framework Foundation -framework AVFoundation -framework CoreGraphics \
   main.m -o "build/Payload/$APP.app/$APP"
 cp Info.plist "build/Payload/$APP.app/"
 # 可选: VERSION=1.2.0 ./build.sh 会把版本号写进 App
