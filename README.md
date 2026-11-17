@@ -17,18 +17,19 @@
 
 ## 安装方式一：LiveContainer 添加源（推荐，一刷新就有新版）
 
-正式版统一发布在 [kylecug/ipa-release](https://github.com/kylecug/ipa-release)（所有 IPA 都在那里，跟 exe 分开）。
 在 LiveContainer 的 **Sources（源）** 页点 **+**，填入：
 
 ```
-https://raw.githubusercontent.com/kylecug/ipa-release/main/ipa/source.json
+https://raw.githubusercontent.com/kylecug/ScannerGo/main/source.json
 ```
 
-或者在 iPhone 上点：`livecontainer://source?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkylecug%2Fipa-release%2Fmain%2Fipa%2Fsource.json`
+或者在 iPhone 上点：`livecontainer://source?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkylecug%2FScannerGo%2Fmain%2Fsource.json`
+
+源里列出所有正式版本，发新版后在源页下拉刷新即可（raw.githubusercontent.com 有几分钟缓存）。
 
 ## 安装方式二：手动下载
 
-- 正式版：[ipa-release 的 Releases](https://github.com/kylecug/ipa-release/releases)，或本仓库 [Releases](https://github.com/kylecug/ScannerGo/releases) 里的 `scannerGo-vX.Y.Z.ipa`
+- 正式版：[Releases](https://github.com/kylecug/ScannerGo/releases) 里的 `scannerGo-vX.Y.Z.ipa`
 - 开发预览版：[Releases → latest](https://github.com/kylecug/ScannerGo/releases/tag/latest)（每次 push 到 `main` 自动更新，不进源）
 
 用 Safari 下载后存到"文件"，在 LiveContainer 里点 **+** 导入。未签名，LiveContainer 会自行签名。
@@ -42,7 +43,7 @@ https://raw.githubusercontent.com/kylecug/ipa-release/main/ipa/source.json
 - **命令行**：`git tag v1.1.0 && git push origin v1.1.0`
 
 GitHub Actions 会自动编译（版本号写进 App）并发布 release `v1.1.0`（附 `scannerGo-v1.1.0.ipa`，自动生成更新说明）。
-`ipa-release` 每小时同步一次，把它搬过去并更新源；想立刻同步就去 ipa-release 的 Actions 手动运行 **Sync IPA**。
+发布完成后会自动重新生成 `source.json` 并提交到 `main`。删除或编辑 release 后也会自动同步；也可以在 Actions 里手动运行 **Update source.json**。
 
 ## 本地编译（Linux / macOS，不需要 Xcode）
 

@@ -1,8 +1,7 @@
 name: Build IPA
 
 # push 到 main      → 编译并覆盖 "latest" 预览版
-# push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z
-#                      （kylecug/ipa-release 每小时会把正式版搬过去并更新 LiveContainer 源）
+# push v* 标签       → 编译带版本号的 IPA，发布正式版 vX.Y.Z，并更新 source.json（LiveContainer 源）
 # 手动运行            → 填了版本号就发正式版 v<版本号>（自动打 tag），不填就同 main
 on:
   push:
@@ -26,6 +25,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,3 +93,7 @@ jobs:
               --title "scannerGo ${TAG}" --generate-notes --latest
           fi
 
+  source:
+    needs: build
+    if: needs.build.outputs.tag != '' && github.event_name != 'pull_request'
+    uses: ./.github/workflows/source.yml

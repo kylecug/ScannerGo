@@ -1,0 +1,46 @@
+name: Update source.json
+
+# 根据所有 v* 正式版 release 重新生成 LiveContainer 源，提交到 main
+on:
+  workflow_call:
+  workflow_dispatch:
+  release:
+    types: [edited, deleted]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-source
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Generate source.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            | python3 scripts/gen_source.py "$GITHUB_REPOSITORY" > source.json
+          python3 -c "import json;d=json.load(open('source.json'));print([v['version'] for v in d['apps'][0]['versions']])"
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- source.json && git ls-files --error-unmatch source.json >/dev/null 2>&1; then
+            echo "source.json 没变化"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source.json
+          git commit -m "Update source.json [skip ci]"
+          for i in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1
