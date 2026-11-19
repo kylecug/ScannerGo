@@ -1,9 +1,110 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <Vision/Vision.h>
+#import <CoreImage/CoreImage.h>
+
+#pragma mark - N 单号 → 二维码
+
+// 文字识别出来的东西里挑 "N + 一串数字" 的单号（比如面单右上角 N26111500026813）。
+// OCR 常把 0 认成 O、1 认成 I/l，N 后面这部分顺手纠一下；纠完还有字母就不要（N06E1D... 这种直接排除）。
+static NSString *ExtractNNumber(NSString *raw) {
+    NSString *s = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] componentsJoinedByString:@""];
+    if (s.length < 2 || [s characterAtIndex:0] != 'N') return nil;
+    NSMutableString *digits = [NSMutableString string];
+    for (NSUInteger i = 1; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == 'O' || c == 'o' || c == 'D') c = '0';
+        else if (c == 'I' || c == 'l' || c == '|') c = '1';
+        if (c < '0' || c > '9') return nil;
+        [digits appendFormat:@"%C", c];
+    }
+    if (digits.length < 8) return nil;   // 太短的大概率是误识别
+    return [@"N" stringByAppendingString:digits];
+}
+
+static UIImage *MakeQRImage(NSString *text, CGFloat scale) {
+    CIFilter *f = [CIFilter filterWithName:@"CIQRCodeGenerator"];
+    [f setValue:[text dataUsingEncoding:NSUTF8StringEncoding] forKey:@"inputMessage"];
+    [f setValue:@"M" forKey:@"inputCorrectionLevel"];
+    CIImage *ci = [f.outputImage imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
+    if (!ci) return nil;
+    static CIContext *ctx; static dispatch_once_t once;
+    dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
+    CGImageRef cg = [ctx createCGImage:ci fromRect:ci.extent];
+    if (!cg) return nil;
+    UIImage *img = [UIImage imageWithCGImage:cg];
+    CGImageRelease(cg);
+    return img;
+}
+
+#pragma mark - 全屏二维码（给别的机器扫）
+
+@interface QRViewController : UIViewController
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic) CGFloat oldBrightness;
+@end
+
+@implementation QRViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor whiteColor];
+    UIImageView *iv = [[UIImageView alloc] initWithImage:MakeQRImage(self.text, 20)];
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.layer.magnificationFilter = kCAFilterNearest;
+    iv.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:iv];
+
+    UILabel *l = [UILabel new];
+    l.text = self.text;
+    l.textColor = [UIColor blackColor];
+    l.font = [UIFont monospacedSystemFontOfSize:22 weight:UIFontWeightSemibold];
+    l.textAlignment = NSTextAlignmentCenter;
+    l.adjustsFontSizeToFitWidth = YES;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:l];
+
+    UILabel *hint = [UILabel new];
+    hint.text = @"点任意处关闭";
+    hint.textColor = [UIColor grayColor];
+    hint.font = [UIFont systemFontOfSize:14];
+    hint.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:hint];
+
+    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [iv.centerXAnchor constraintEqualToAnchor:g.centerXAnchor],
+        [iv.centerYAnchor constraintEqualToAnchor:g.centerYAnchor constant:-20],
+        [iv.widthAnchor constraintEqualToAnchor:iv.heightAnchor],
+        [iv.widthAnchor constraintLessThanOrEqualToAnchor:g.widthAnchor multiplier:0.85],
+        [iv.heightAnchor constraintLessThanOrEqualToAnchor:g.heightAnchor multiplier:0.7],
+        [l.topAnchor constraintEqualToAnchor:iv.bottomAnchor constant:16],
+        [l.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [l.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [hint.centerXAnchor constraintEqualToAnchor:g.centerXAnchor],
+        [hint.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-16],
+    ]];
+    NSLayoutConstraint *big = [iv.widthAnchor constraintEqualToAnchor:g.widthAnchor multiplier:0.85];
+    big.priority = UILayoutPriorityDefaultHigh;
+    big.active = YES;
+
+    [self.view addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)]];
+}
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // 屏幕调到最亮，扫枪 / 别的手机更好扫
+    self.oldBrightness = [UIScreen mainScreen].brightness;
+    [UIScreen mainScreen].brightness = 1.0;
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [UIScreen mainScreen].brightness = self.oldBrightness;
+}
+- (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
+@end
 
 #pragma mark - 扫码页面
 
-@interface ScannerViewController : UIViewController <AVCaptureMetadataOutputObjectsDelegate>
+@interface ScannerViewController : UIViewController <AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, strong) AVCaptureSession *session;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *previewLayer;
 @property (nonatomic, strong) dispatch_queue_t sessionQueue;
@@ -16,6 +117,17 @@
 @property (nonatomic, strong) NSURL *pendingURL;
 @property (nonatomic, strong) AVCaptureDevice *device;
 @property (nonatomic, strong) UIView *focusBox;
+// 文字识别（N 单号 → 二维码）
+@property (nonatomic, strong) dispatch_queue_t videoQueue;
+@property (nonatomic, strong) VNRecognizeTextRequest *textRequest;
+@property (atomic) CGImagePropertyOrientation ocrOrientation;
+@property (nonatomic) CFTimeInterval lastOCRTime;        // 只在 videoQueue 上用
+@property (nonatomic, copy) NSString *ocrCandidate;      // 只在 videoQueue 上用：连续两次认出同一串才算数
+@property (nonatomic, copy) NSString *currentNNumber;
+@property (nonatomic, strong) NSDate *lastNNumberTime;
+@property (nonatomic, strong) UIControl *qrCard;
+@property (nonatomic, strong) UIImageView *qrImageView;
+@property (nonatomic, strong) UILabel *qrLabel;
 @end
 
 static NSString *const kSavedTextKey = @"ScannedText";
@@ -67,6 +179,31 @@ static NSString *const kSavedTextKey = @"ScannedText";
     [self.previewView addSubview:self.focusBox];
     [self.previewView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTapToFocus:)]];
 
+    // 左上角：识别到 N 单号后生成的二维码，点一下全屏放大
+    self.qrCard = [UIControl new];
+    self.qrCard.backgroundColor = [UIColor whiteColor];
+    self.qrCard.layer.cornerRadius = 10;
+    self.qrCard.hidden = YES;
+    self.qrCard.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrCard addTarget:self action:@selector(showBigQR) forControlEvents:UIControlEventTouchUpInside];
+    [self.previewView addSubview:self.qrCard];
+
+    self.qrImageView = [UIImageView new];
+    self.qrImageView.contentMode = UIViewContentModeScaleAspectFit;
+    self.qrImageView.layer.magnificationFilter = kCAFilterNearest;
+    self.qrImageView.userInteractionEnabled = NO;
+    self.qrImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrCard addSubview:self.qrImageView];
+
+    self.qrLabel = [UILabel new];
+    self.qrLabel.textColor = [UIColor blackColor];
+    self.qrLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+    self.qrLabel.textAlignment = NSTextAlignmentCenter;
+    self.qrLabel.adjustsFontSizeToFitWidth = YES;
+    self.qrLabel.minimumScaleFactor = 0.6;
+    self.qrLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrCard addSubview:self.qrLabel];
+
     // 结果文本框
     self.textView = [UITextView new];
     self.textView.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
@@ -104,6 +241,18 @@ static NSString *const kSavedTextKey = @"ScannedText";
         [self.openButton.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor constant:-12],
         [self.openButton.heightAnchor constraintEqualToConstant:32],
 
+        [self.qrCard.topAnchor constraintEqualToAnchor:self.previewView.topAnchor constant:12],
+        [self.qrCard.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor constant:12],
+        [self.qrCard.widthAnchor constraintEqualToConstant:132],
+        [self.qrImageView.topAnchor constraintEqualToAnchor:self.qrCard.topAnchor constant:8],
+        [self.qrImageView.leadingAnchor constraintEqualToAnchor:self.qrCard.leadingAnchor constant:8],
+        [self.qrImageView.trailingAnchor constraintEqualToAnchor:self.qrCard.trailingAnchor constant:-8],
+        [self.qrImageView.heightAnchor constraintEqualToAnchor:self.qrImageView.widthAnchor],
+        [self.qrLabel.topAnchor constraintEqualToAnchor:self.qrImageView.bottomAnchor constant:4],
+        [self.qrLabel.leadingAnchor constraintEqualToAnchor:self.qrCard.leadingAnchor constant:6],
+        [self.qrLabel.trailingAnchor constraintEqualToAnchor:self.qrCard.trailingAnchor constant:-6],
+        [self.qrLabel.bottomAnchor constraintEqualToAnchor:self.qrCard.bottomAnchor constant:-6],
+
         [self.textView.topAnchor constraintEqualToAnchor:self.previewView.bottomAnchor constant:12],
         [self.textView.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor],
         [self.textView.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor],
@@ -116,6 +265,17 @@ static NSString *const kSavedTextKey = @"ScannedText";
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     self.previewLayer.frame = self.previewView.bounds;
+    [self updateOCROrientation];
+}
+
+// 后置摄像头原始画面是横的（Home 键在右），按当前界面方向告诉 Vision 怎么转
+- (void)updateOCROrientation {
+    UIInterfaceOrientation o = self.view.window.windowScene.interfaceOrientation;
+    CGImagePropertyOrientation r = kCGImagePropertyOrientationRight;
+    if (o == UIInterfaceOrientationLandscapeRight) r = kCGImagePropertyOrientationUp;
+    else if (o == UIInterfaceOrientationLandscapeLeft) r = kCGImagePropertyOrientationDown;
+    else if (o == UIInterfaceOrientationPortraitUpsideDown) r = kCGImagePropertyOrientationLeft;
+    self.ocrOrientation = r;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -176,6 +336,22 @@ static NSString *const kSavedTextKey = @"ScannedText";
     NSMutableArray *types = [NSMutableArray array];
     for (NSString *t in wanted) if ([output.availableMetadataObjectTypes containsObject:t]) [types addObject:t];
     output.metadataObjectTypes = types;
+
+    // 视频帧输出：拿来做文字识别，找 N 开头的单号
+    AVCaptureVideoDataOutput *video = [AVCaptureVideoDataOutput new];
+    video.alwaysDiscardsLateVideoFrames = YES;
+    video.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)};
+    if ([session canAddOutput:video]) {
+        self.videoQueue = dispatch_queue_create("scanner.ocr", DISPATCH_QUEUE_SERIAL);
+        [video setSampleBufferDelegate:self queue:self.videoQueue];
+        [session addOutput:video];
+        VNRecognizeTextRequest *req = [VNRecognizeTextRequest new];
+        req.recognitionLevel = VNRequestTextRecognitionLevelAccurate; // 数字要准，慢点无所谓
+        req.usesLanguageCorrection = NO;
+        req.minimumTextHeight = 0.02;
+        self.textRequest = req;
+        self.ocrOrientation = kCGImagePropertyOrientationRight;
+    }
 
     self.session = session;
     self.device = device;
@@ -291,6 +467,59 @@ static const float kMinCodeSizeMM = 20.0f;
     }
 }
 
+#pragma mark 文字识别
+
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    // 大概每 0.4 秒认一次，省电；慢的帧系统会自己丢
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - self.lastOCRTime < 0.4) return;
+    self.lastOCRTime = now;
+
+    CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!px || !self.textRequest) return;
+    VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:px orientation:self.ocrOrientation options:@{}];
+    if (![h performRequests:@[self.textRequest] error:nil]) return;
+
+    // 同一帧里有多个（面单右上角 + 侧边 Sender Ref 一般是同一个号）就挑最长的
+    NSString *best = nil;
+    for (VNRecognizedTextObservation *obs in self.textRequest.results) {
+        for (VNRecognizedText *t in [obs topCandidates:3]) {
+            NSString *n = ExtractNNumber(t.string);
+            if (n && n.length > best.length) best = n;
+            if (n) break;
+        }
+    }
+    if (!best) { self.ocrCandidate = nil; return; }
+
+    // 连续两次认出一模一样的才采用，防止看错一两位
+    if (![best isEqualToString:self.ocrCandidate]) { self.ocrCandidate = best; return; }
+    dispatch_async(dispatch_get_main_queue(), ^{ [self foundNNumber:best]; });
+}
+
+- (void)foundNNumber:(NSString *)n {
+    // 同一个号一直对着时，10 秒内不重复记录
+    if ([n isEqualToString:self.currentNNumber] && self.lastNNumberTime && -[self.lastNNumberTime timeIntervalSinceNow] < 10) return;
+    BOOL changed = ![n isEqualToString:self.currentNNumber];
+    self.currentNNumber = n;
+    self.lastNNumberTime = [NSDate date];
+
+    if (changed) {
+        self.qrImageView.image = MakeQRImage(n, 10);
+        self.qrLabel.text = n;
+        self.qrCard.hidden = NO;
+    }
+    [self appendResult:n type:@"文字→QR"];
+    [self showStatus:[NSString stringWithFormat:@"单号 %@ 已转成二维码，点左上角放大", n]];
+}
+
+- (void)showBigQR {
+    if (!self.currentNNumber) return;
+    QRViewController *vc = [QRViewController new];
+    vc.text = self.currentNNumber;
+    vc.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:vc animated:YES completion:nil];
+}
+
 #pragma mark 结果
 
 - (NSString *)prettyType:(AVMetadataObjectType)t {
@@ -335,6 +564,8 @@ static const float kMinCodeSizeMM = 20.0f;
 - (void)clearText {
     self.textView.text = @"";
     self.lastValue = nil;
+    self.currentNNumber = nil;
+    self.qrCard.hidden = YES;
     [self updateOpenButtonFor:@""];
     [self saveText];
     [self showStatus:@"已清空，对准二维码 / 条形码"];
