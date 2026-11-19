@@ -104,6 +104,11 @@ static UIImage *MakeQRImage(NSString *text, CGFloat scale) {
 
 #pragma mark - 扫码页面
 
+typedef NS_ENUM(NSInteger, ScanMode) {
+    ScanModeCode = 0,   // 扫码 → 文本
+    ScanModeText = 1,   // 文字 → 二维码
+};
+
 @interface ScannerViewController : UIViewController <AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, strong) AVCaptureSession *session;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *previewLayer;
@@ -117,6 +122,20 @@ static UIImage *MakeQRImage(NSString *text, CGFloat scale) {
 @property (nonatomic, strong) NSURL *pendingURL;
 @property (nonatomic, strong) AVCaptureDevice *device;
 @property (nonatomic, strong) UIView *focusBox;
+@property (nonatomic, copy) NSString *cameraHint;
+// 模式
+@property (atomic) ScanMode mode;
+@property (nonatomic, strong) UISegmentedControl *modeSwitch;
+// 按住扫描 / 拖到锁上常开
+@property (nonatomic, strong) UIView *holdButton;
+@property (nonatomic, strong) UIImageView *holdIcon;
+@property (nonatomic, strong) UIView *lockTarget;
+@property (nonatomic, strong) UIImageView *lockIcon;
+@property (nonatomic) BOOL holding;
+@property (nonatomic) BOOL locked;
+@property (nonatomic) BOOL overLock;
+@property (nonatomic) BOOL pressStartedLocked;
+@property (atomic) BOOL cameraOn;
 // 文字识别（N 单号 → 二维码）
 @property (nonatomic, strong) dispatch_queue_t videoQueue;
 @property (nonatomic, strong) VNRecognizeTextRequest *textRequest;
@@ -124,21 +143,28 @@ static UIImage *MakeQRImage(NSString *text, CGFloat scale) {
 @property (nonatomic) CFTimeInterval lastOCRTime;        // 只在 videoQueue 上用
 @property (nonatomic, copy) NSString *ocrCandidate;      // 只在 videoQueue 上用：连续两次认出同一串才算数
 @property (nonatomic, copy) NSString *currentNNumber;
-@property (nonatomic, strong) NSDate *lastNNumberTime;
-@property (nonatomic, strong) UIControl *qrCard;
+@property (nonatomic, strong) UIControl *qrPanel;
 @property (nonatomic, strong) UIImageView *qrImageView;
 @property (nonatomic, strong) UILabel *qrLabel;
 @end
 
 static NSString *const kSavedTextKey = @"ScannedText";
+static NSString *const kModeKey = @"ScanMode";
+static NSString *const kLastNNumberKey = @"LastNNumber";
+static const CGFloat kHoldSize = 84;
 
 @implementation ScannerViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"scannerGo";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.sessionQueue = dispatch_queue_create("scanner.session", DISPATCH_QUEUE_SERIAL);
+
+    // 顶部：模式切换
+    self.modeSwitch = [[UISegmentedControl alloc] initWithItems:@[@"扫码→文本", @"文字→二维码"]];
+    self.modeSwitch.selectedSegmentIndex = [[NSUserDefaults standardUserDefaults] integerForKey:kModeKey] == ScanModeText ? 1 : 0;
+    [self.modeSwitch addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
+    self.navigationItem.titleView = self.modeSwitch;
 
     // 摄像头预览区
     self.previewView = [UIView new];
@@ -149,7 +175,6 @@ static NSString *const kSavedTextKey = @"ScannedText";
     [self.view addSubview:self.previewView];
 
     self.statusLabel = [UILabel new];
-    self.statusLabel.text = @"对准二维码 / 条形码";
     self.statusLabel.textColor = [UIColor whiteColor];
     self.statusLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -179,32 +204,7 @@ static NSString *const kSavedTextKey = @"ScannedText";
     [self.previewView addSubview:self.focusBox];
     [self.previewView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTapToFocus:)]];
 
-    // 左上角：识别到 N 单号后生成的二维码，点一下全屏放大
-    self.qrCard = [UIControl new];
-    self.qrCard.backgroundColor = [UIColor whiteColor];
-    self.qrCard.layer.cornerRadius = 10;
-    self.qrCard.hidden = YES;
-    self.qrCard.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.qrCard addTarget:self action:@selector(showBigQR) forControlEvents:UIControlEventTouchUpInside];
-    [self.previewView addSubview:self.qrCard];
-
-    self.qrImageView = [UIImageView new];
-    self.qrImageView.contentMode = UIViewContentModeScaleAspectFit;
-    self.qrImageView.layer.magnificationFilter = kCAFilterNearest;
-    self.qrImageView.userInteractionEnabled = NO;
-    self.qrImageView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.qrCard addSubview:self.qrImageView];
-
-    self.qrLabel = [UILabel new];
-    self.qrLabel.textColor = [UIColor blackColor];
-    self.qrLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
-    self.qrLabel.textAlignment = NSTextAlignmentCenter;
-    self.qrLabel.adjustsFontSizeToFitWidth = YES;
-    self.qrLabel.minimumScaleFactor = 0.6;
-    self.qrLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.qrCard addSubview:self.qrLabel];
-
-    // 结果文本框
+    // 扫码模式：结果文本框
     self.textView = [UITextView new];
     self.textView.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
     self.textView.layer.borderColor = [UIColor separatorColor].CGColor;
@@ -215,22 +215,91 @@ static NSString *const kSavedTextKey = @"ScannedText";
     self.textView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.textView];
 
-    // 键盘上加个"完成"
     UIToolbar *bar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
     bar.items = @[[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil],
                   [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(dismissKeyboard)]];
     [bar sizeToFit];
     self.textView.inputAccessoryView = bar;
 
+    // 文字→二维码模式：大二维码，一直留着，直到认出下一个号
+    self.qrPanel = [UIControl new];
+    self.qrPanel.backgroundColor = [UIColor whiteColor];
+    self.qrPanel.layer.cornerRadius = 12;
+    self.qrPanel.layer.borderColor = [UIColor separatorColor].CGColor;
+    self.qrPanel.layer.borderWidth = 1;
+    self.qrPanel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrPanel addTarget:self action:@selector(showBigQR) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.qrPanel];
+
+    self.qrImageView = [UIImageView new];
+    self.qrImageView.contentMode = UIViewContentModeScaleAspectFit;
+    self.qrImageView.layer.magnificationFilter = kCAFilterNearest;
+    self.qrImageView.userInteractionEnabled = NO;
+    self.qrImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrPanel addSubview:self.qrImageView];
+
+    self.qrLabel = [UILabel new];
+    self.qrLabel.textColor = [UIColor blackColor];
+    self.qrLabel.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightSemibold];
+    self.qrLabel.textAlignment = NSTextAlignmentCenter;
+    self.qrLabel.numberOfLines = 0;
+    self.qrLabel.adjustsFontSizeToFitWidth = YES;
+    self.qrLabel.minimumScaleFactor = 0.5;
+    self.qrLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.qrPanel addSubview:self.qrLabel];
+
+    // 底部：按住扫描的大按钮
+    self.holdButton = [UIView new];
+    self.holdButton.backgroundColor = [UIColor systemBlueColor];
+    self.holdButton.layer.cornerRadius = kHoldSize / 2;
+    self.holdButton.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.holdButton.layer.shadowOpacity = 0.2;
+    self.holdButton.layer.shadowRadius = 6;
+    self.holdButton.layer.shadowOffset = CGSizeMake(0, 2);
+    self.holdButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.holdButton.accessibilityLabel = @"按住扫描";
+    [self.view addSubview:self.holdButton];
+
+    UIImageSymbolConfiguration *big = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightSemibold];
+    self.holdIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"camera.viewfinder" withConfiguration:big]];
+    self.holdIcon.tintColor = [UIColor whiteColor];
+    self.holdIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.holdButton addSubview:self.holdIcon];
+
+    UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleHold:)];
+    press.minimumPressDuration = 0;
+    press.allowableMovement = CGFLOAT_MAX;
+    [self.holdButton addGestureRecognizer:press];
+
+    // 按钮上方的锁：按住往上拖到这里松手 = 常开
+    self.lockTarget = [UIView new];
+    self.lockTarget.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    self.lockTarget.layer.cornerRadius = 26;
+    self.lockTarget.layer.borderColor = [UIColor separatorColor].CGColor;
+    self.lockTarget.layer.borderWidth = 1;
+    self.lockTarget.alpha = 0;
+    self.lockTarget.userInteractionEnabled = NO;
+    self.lockTarget.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.lockTarget];
+
+    UIImageSymbolConfiguration *mid = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightSemibold];
+    self.lockIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"lock.open" withConfiguration:mid]];
+    self.lockIcon.tintColor = [UIColor secondaryLabelColor];
+    self.lockIcon.contentMode = UIViewContentModeCenter;
+    self.lockIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.lockTarget addSubview:self.lockIcon];
+
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain target:self action:@selector(clearText)];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制" style:UIBarButtonItemStylePlain target:self action:@selector(copyText)];
 
     UILayoutGuide *g = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *textToButton = [self.textView.bottomAnchor constraintEqualToAnchor:self.holdButton.topAnchor constant:-16];
+    textToButton.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
         [self.previewView.topAnchor constraintEqualToAnchor:g.topAnchor constant:12],
         [self.previewView.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [self.previewView.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [self.previewView.heightAnchor constraintEqualToAnchor:g.heightAnchor multiplier:0.5],
+        [self.previewView.heightAnchor constraintEqualToAnchor:g.heightAnchor multiplier:0.4],
 
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor],
@@ -241,24 +310,56 @@ static NSString *const kSavedTextKey = @"ScannedText";
         [self.openButton.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor constant:-12],
         [self.openButton.heightAnchor constraintEqualToConstant:32],
 
-        [self.qrCard.topAnchor constraintEqualToAnchor:self.previewView.topAnchor constant:12],
-        [self.qrCard.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor constant:12],
-        [self.qrCard.widthAnchor constraintEqualToConstant:132],
-        [self.qrImageView.topAnchor constraintEqualToAnchor:self.qrCard.topAnchor constant:8],
-        [self.qrImageView.leadingAnchor constraintEqualToAnchor:self.qrCard.leadingAnchor constant:8],
-        [self.qrImageView.trailingAnchor constraintEqualToAnchor:self.qrCard.trailingAnchor constant:-8],
-        [self.qrImageView.heightAnchor constraintEqualToAnchor:self.qrImageView.widthAnchor],
-        [self.qrLabel.topAnchor constraintEqualToAnchor:self.qrImageView.bottomAnchor constant:4],
-        [self.qrLabel.leadingAnchor constraintEqualToAnchor:self.qrCard.leadingAnchor constant:6],
-        [self.qrLabel.trailingAnchor constraintEqualToAnchor:self.qrCard.trailingAnchor constant:-6],
-        [self.qrLabel.bottomAnchor constraintEqualToAnchor:self.qrCard.bottomAnchor constant:-6],
-
+        // 文本框：键盘弹出时让位，平时到按钮上方
         [self.textView.topAnchor constraintEqualToAnchor:self.previewView.bottomAnchor constant:12],
         [self.textView.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor],
         [self.textView.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor],
-        [self.textView.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-12],
-    ]];
+        [self.textView.bottomAnchor constraintLessThanOrEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-12],
+        [self.textView.bottomAnchor constraintLessThanOrEqualToAnchor:self.holdButton.topAnchor constant:-16],
+        textToButton,
 
+        // 二维码面板：占同一块位置
+        [self.qrPanel.topAnchor constraintEqualToAnchor:self.previewView.bottomAnchor constant:12],
+        [self.qrPanel.leadingAnchor constraintEqualToAnchor:self.previewView.leadingAnchor],
+        [self.qrPanel.trailingAnchor constraintEqualToAnchor:self.previewView.trailingAnchor],
+        [self.qrPanel.bottomAnchor constraintEqualToAnchor:self.holdButton.topAnchor constant:-16],
+        [self.qrImageView.topAnchor constraintEqualToAnchor:self.qrPanel.topAnchor constant:12],
+        [self.qrImageView.centerXAnchor constraintEqualToAnchor:self.qrPanel.centerXAnchor],
+        [self.qrImageView.widthAnchor constraintEqualToAnchor:self.qrImageView.heightAnchor],
+        [self.qrImageView.widthAnchor constraintLessThanOrEqualToAnchor:self.qrPanel.widthAnchor constant:-24],
+        [self.qrLabel.topAnchor constraintEqualToAnchor:self.qrImageView.bottomAnchor constant:6],
+        [self.qrLabel.leadingAnchor constraintEqualToAnchor:self.qrPanel.leadingAnchor constant:12],
+        [self.qrLabel.trailingAnchor constraintEqualToAnchor:self.qrPanel.trailingAnchor constant:-12],
+        [self.qrLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.qrPanel.bottomAnchor constant:-10],
+
+        // 底部按钮
+        [self.holdButton.centerXAnchor constraintEqualToAnchor:g.centerXAnchor],
+        [self.holdButton.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-16],
+        [self.holdButton.widthAnchor constraintEqualToConstant:kHoldSize],
+        [self.holdButton.heightAnchor constraintEqualToConstant:kHoldSize],
+        [self.holdIcon.centerXAnchor constraintEqualToAnchor:self.holdButton.centerXAnchor],
+        [self.holdIcon.centerYAnchor constraintEqualToAnchor:self.holdButton.centerYAnchor],
+
+        [self.lockTarget.centerXAnchor constraintEqualToAnchor:self.holdButton.centerXAnchor],
+        [self.lockTarget.bottomAnchor constraintEqualToAnchor:self.holdButton.topAnchor constant:-40],
+        [self.lockTarget.widthAnchor constraintEqualToConstant:52],
+        [self.lockTarget.heightAnchor constraintEqualToConstant:52],
+        [self.lockIcon.centerXAnchor constraintEqualToAnchor:self.lockTarget.centerXAnchor],
+        [self.lockIcon.centerYAnchor constraintEqualToAnchor:self.lockTarget.centerYAnchor],
+    ]];
+    // 二维码尽量大，但给下面的单号文字留位置
+    NSLayoutConstraint *qrBig = [self.qrImageView.widthAnchor constraintEqualToAnchor:self.qrPanel.widthAnchor constant:-24];
+    qrBig.priority = UILayoutPriorityDefaultLow + 10;
+    qrBig.active = YES;
+    [self.qrLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+    for (NSNumber *ax in @[@(UILayoutConstraintAxisVertical), @(UILayoutConstraintAxisHorizontal)]) {
+        [self.qrImageView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow - 10 forAxis:ax.integerValue];
+        [self.qrImageView setContentHuggingPriority:UILayoutPriorityDefaultLow - 10 forAxis:ax.integerValue];
+    }
+
+    // 上次的单号继续显示
+    [self setQRText:[[NSUserDefaults standardUserDefaults] stringForKey:kLastNNumberKey]];
+    [self applyMode];
     [self requestCameraAndStart];
 }
 
@@ -280,12 +381,131 @@ static NSString *const kSavedTextKey = @"ScannedText";
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    [self startSession];
+    [self syncCamera];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     dispatch_async(self.sessionQueue, ^{ if (self.session.isRunning) [self.session stopRunning]; });
+}
+
+#pragma mark 模式
+
+- (void)modeChanged {
+    [[NSUserDefaults standardUserDefaults] setInteger:self.modeSwitch.selectedSegmentIndex forKey:kModeKey];
+    [self applyMode];
+    [[UISelectionFeedbackGenerator new] selectionChanged];
+}
+
+- (void)applyMode {
+    self.mode = self.modeSwitch.selectedSegmentIndex == 1 ? ScanModeText : ScanModeCode;
+    BOOL text = self.mode == ScanModeText;
+    self.textView.hidden = text;
+    self.qrPanel.hidden = !text;
+    if (text) { [self.textView resignFirstResponder]; self.openButton.hidden = YES; }
+    else [self updateOpenButtonFor:self.lastValue ?: @""];
+    if (self.videoQueue) dispatch_async(self.videoQueue, ^{ self.ocrCandidate = nil; });
+    [self refreshIdleStatus];
+}
+
+- (void)refreshIdleStatus {
+    NSString *what = self.mode == ScanModeText ? @"N 开头的单号" : @"二维码 / 条形码";
+    if (self.cameraOn) {
+        NSString *s = self.locked ? [NSString stringWithFormat:@"常开中 · 对准%@（点按钮关闭）", what]
+                                  : [NSString stringWithFormat:@"对准%@，松手关闭", what];
+        if (self.cameraHint) s = [s stringByAppendingFormat:@"\n%@", self.cameraHint];
+        [self showStatus:s];
+    } else {
+        [self showStatus:[NSString stringWithFormat:@"按住下方按钮扫描%@；往上拖到 🔒 常开", what]];
+    }
+}
+
+#pragma mark 按住扫描 / 锁定常开
+
+- (void)handleHold:(UILongPressGestureRecognizer *)gr {
+    CGPoint p = [gr locationInView:self.view];
+    switch (gr.state) {
+        case UIGestureRecognizerStateBegan:
+            [self.textView resignFirstResponder];
+            self.pressStartedLocked = self.locked;
+            self.holding = YES;
+            self.overLock = NO;
+            if (!self.locked) {
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+                [self showLockTarget:YES];
+            }
+            [self syncCamera];
+            [self updateHoldAppearance];
+            break;
+        case UIGestureRecognizerStateChanged: {
+            if (self.pressStartedLocked) break;
+            // 手指进到锁的范围（放宽一圈，好拖）
+            BOOL over = CGRectContainsPoint(CGRectInset(self.lockTarget.frame, -24, -24), p);
+            if (over != self.overLock) {
+                self.overLock = over;
+                if (over) [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+                [self updateHoldAppearance];
+            }
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            self.holding = NO;
+            if (self.pressStartedLocked) {
+                // 常开状态下点一下按钮 = 解锁并关闭
+                self.locked = NO;
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+            } else if (self.overLock && gr.state == UIGestureRecognizerStateEnded) {
+                self.locked = YES;
+                [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            }
+            self.overLock = NO;
+            [self showLockTarget:self.locked];
+            [self syncCamera];
+            [self updateHoldAppearance];
+            break;
+        default: break;
+    }
+}
+
+- (void)showLockTarget:(BOOL)show {
+    [UIView animateWithDuration:0.18 animations:^{
+        self.lockTarget.alpha = show ? 1 : 0;
+        self.lockTarget.transform = show ? CGAffineTransformIdentity : CGAffineTransformMakeTranslation(0, 20);
+    }];
+}
+
+- (void)updateHoldAppearance {
+    UIImageSymbolConfiguration *mid = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightSemibold];
+    BOOL lit = self.locked || self.overLock;
+    self.lockIcon.image = [UIImage systemImageNamed:lit ? @"lock.fill" : @"lock.open" withConfiguration:mid];
+    self.lockIcon.tintColor = lit ? [UIColor whiteColor] : [UIColor secondaryLabelColor];
+    self.lockTarget.backgroundColor = lit ? [UIColor systemOrangeColor] : [UIColor secondarySystemBackgroundColor];
+    self.lockTarget.transform = self.overLock ? CGAffineTransformMakeScale(1.2, 1.2) : CGAffineTransformIdentity;
+
+    UIImageSymbolConfiguration *big = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightSemibold];
+    self.holdIcon.image = [UIImage systemImageNamed:self.locked ? @"stop.fill" : @"camera.viewfinder" withConfiguration:big];
+    self.holdButton.backgroundColor = self.locked ? [UIColor systemOrangeColor]
+                                    : (self.holding ? [UIColor systemGreenColor] : [UIColor systemBlueColor]);
+    self.holdButton.transform = self.holding ? CGAffineTransformMakeScale(1.1, 1.1) : CGAffineTransformIdentity;
+    self.holdButton.accessibilityLabel = self.locked ? @"常开中，点一下关闭" : @"按住扫描";
+}
+
+// 按住或锁定时开摄像头，否则关
+- (void)syncCamera {
+    BOOL want = (self.holding || self.locked) && self.viewIfLoaded.window != nil;
+    self.cameraOn = want;
+    self.previewLayer.hidden = !want;
+    [UIApplication sharedApplication].idleTimerDisabled = self.locked; // 常开时别自动锁屏
+    if (!want && self.videoQueue) dispatch_async(self.videoQueue, ^{ self.ocrCandidate = nil; });
+    if (self.session) {
+        dispatch_async(self.sessionQueue, ^{
+            if (!self.cameraOn && self.session.isRunning) [self.session stopRunning];
+            else if (self.cameraOn && !self.session.isRunning) [self.session startRunning];
+        });
+    }
+    [self refreshIdleStatus];
 }
 
 #pragma mark 相机
@@ -360,7 +580,7 @@ static NSString *const kSavedTextKey = @"ScannedText";
     self.previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     self.previewLayer.frame = self.previewView.bounds;
     [self.previewView.layer insertSublayer:self.previewLayer atIndex:0];
-    [self startSession];
+    [self syncCamera];   // 默认不开，按住按钮才开
 }
 
 #pragma mark 对焦
@@ -409,20 +629,14 @@ static const float kMinCodeSizeMM = 20.0f;
     [d unlockForConfiguration];
 
     CGFloat zoomNow = d.videoZoomFactor;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (macro) {
-            [self showStatus:@"凑近会自动切微距镜头（点画面可对焦）"];
-        } else if (zoomNow > 1.01) {
-            [self showStatus:[NSString stringWithFormat:@"已自动放大 %.1fx，离远一点更清楚（点画面可对焦）", zoomNow]];
-        } else {
-            [self showStatus:@"对准二维码 / 条形码（点画面可对焦）"];
-        }
-    });
+    if (macro) self.cameraHint = @"凑近会自动切微距镜头（点画面可对焦）";
+    else if (zoomNow > 1.01) self.cameraHint = [NSString stringWithFormat:@"已自动放大 %.1fx，离远一点更清楚", zoomNow];
+    else self.cameraHint = @"点画面可对焦";
 }
 
 - (void)handleTapToFocus:(UITapGestureRecognizer *)g {
     AVCaptureDevice *d = self.device;
-    if (!d || !self.previewLayer) return;
+    if (!d || !self.previewLayer || !self.cameraOn) return;
     CGPoint viewPoint = [g locationInView:self.previewView];
     CGPoint devPoint = [self.previewLayer captureDevicePointOfInterestForPoint:viewPoint];
     dispatch_async(self.sessionQueue, ^{
@@ -447,12 +661,8 @@ static const float kMinCodeSizeMM = 20.0f;
     }];
 }
 
-- (void)startSession {
-    if (!self.session) return;
-    dispatch_async(self.sessionQueue, ^{ if (!self.session.isRunning) [self.session startRunning]; });
-}
-
 - (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray<__kindof AVMetadataObject *> *)objects fromConnection:(AVCaptureConnection *)connection {
+    if (self.mode != ScanModeCode || !self.cameraOn) return;
     for (AVMetadataObject *obj in objects) {
         if (![obj isKindOfClass:[AVMetadataMachineReadableCodeObject class]]) continue;
         NSString *value = ((AVMetadataMachineReadableCodeObject *)obj).stringValue;
@@ -464,12 +674,15 @@ static const float kMinCodeSizeMM = 20.0f;
         self.lastTime = [NSDate date];
 
         [self appendResult:value type:obj.type];
+        [self updateOpenButtonFor:value];
+        [self flashSuccess];
     }
 }
 
 #pragma mark 文字识别
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    if (self.mode != ScanModeText || !self.cameraOn) return;
     // 大概每 0.4 秒认一次，省电；慢的帧系统会自己丢
     CFTimeInterval now = CACurrentMediaTime();
     if (now - self.lastOCRTime < 0.4) return;
@@ -497,19 +710,27 @@ static const float kMinCodeSizeMM = 20.0f;
 }
 
 - (void)foundNNumber:(NSString *)n {
-    // 同一个号一直对着时，10 秒内不重复记录
-    if ([n isEqualToString:self.currentNNumber] && self.lastNNumberTime && -[self.lastNNumberTime timeIntervalSinceNow] < 10) return;
-    BOOL changed = ![n isEqualToString:self.currentNNumber];
-    self.currentNNumber = n;
-    self.lastNNumberTime = [NSDate date];
-
-    if (changed) {
-        self.qrImageView.image = MakeQRImage(n, 10);
-        self.qrLabel.text = n;
-        self.qrCard.hidden = NO;
-    }
+    if (self.mode != ScanModeText || !self.cameraOn) return;
+    // 二维码一直留着；只有认出一个"不一样"的号才换
+    if ([n isEqualToString:self.currentNNumber]) return;
+    [self setQRText:n];
+    [[NSUserDefaults standardUserDefaults] setObject:n forKey:kLastNNumberKey];
     [self appendResult:n type:@"文字→QR"];
-    [self showStatus:[NSString stringWithFormat:@"单号 %@ 已转成二维码，点左上角放大", n]];
+    [self flashSuccess];
+    [self showStatus:[NSString stringWithFormat:@"单号 %@ 已转成二维码，点二维码全屏", n]];
+}
+
+- (void)setQRText:(NSString *)n {
+    self.currentNNumber = n.length ? n : nil;
+    if (self.currentNNumber) {
+        self.qrImageView.image = MakeQRImage(n, 12);
+        self.qrLabel.text = n;
+        self.qrLabel.textColor = [UIColor blackColor];
+    } else {
+        self.qrImageView.image = nil;
+        self.qrLabel.text = @"还没有识别到 N 开头的单号";
+        self.qrLabel.textColor = [UIColor grayColor];
+    }
 }
 
 - (void)showBigQR {
@@ -533,7 +754,7 @@ static const float kMinCodeSizeMM = 20.0f;
     return m[t] ?: t;
 }
 
-- (void)appendResult:(NSString *)value type:(AVMetadataObjectType)type {
+- (void)appendResult:(NSString *)value type:(NSString *)type {
     NSDateFormatter *f = [NSDateFormatter new];
     f.dateFormat = @"HH:mm:ss";
     NSString *line = [NSString stringWithFormat:@"[%@ %@] %@", [f stringFromDate:[NSDate date]], [self prettyType:type], value];
@@ -542,12 +763,11 @@ static const float kMinCodeSizeMM = 20.0f;
     self.textView.text = old.length ? [old stringByAppendingFormat:@"\n%@", line] : line;
     [self.textView scrollRangeToVisible:NSMakeRange(self.textView.text.length, 0)];
     [self saveText];
-
     [self showStatus:[NSString stringWithFormat:@"已识别：%@", value]];
-    [self updateOpenButtonFor:value];
-    [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
+}
 
-    // 预览闪一下绿框
+- (void)flashSuccess {
+    [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
     self.previewView.layer.borderColor = [UIColor systemGreenColor].CGColor;
     self.previewView.layer.borderWidth = 4;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -562,17 +782,25 @@ static const float kMinCodeSizeMM = 20.0f;
 }
 
 - (void)clearText {
+    if (self.mode == ScanModeText) {
+        // 文字→二维码模式下"清空"只清掉当前二维码
+        [self setQRText:nil];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLastNNumberKey];
+        if (self.videoQueue) dispatch_async(self.videoQueue, ^{ self.ocrCandidate = nil; });
+        [self showStatus:@"二维码已清空"];
+        return;
+    }
     self.textView.text = @"";
     self.lastValue = nil;
-    self.currentNNumber = nil;
-    self.qrCard.hidden = YES;
     [self updateOpenButtonFor:@""];
     [self saveText];
-    [self showStatus:@"已清空，对准二维码 / 条形码"];
+    [self showStatus:@"已清空"];
 }
 
 - (void)copyText {
-    [UIPasteboard generalPasteboard].string = self.textView.text;
+    NSString *s = self.mode == ScanModeText ? self.currentNNumber : self.textView.text;
+    if (!s.length) { [self showStatus:@"没有可复制的内容"]; return; }
+    [UIPasteboard generalPasteboard].string = s;
     [self showStatus:@"已复制到剪贴板"];
 }
 
@@ -582,7 +810,7 @@ static const float kMinCodeSizeMM = 20.0f;
     NSString *scheme = url.scheme.lowercaseString;
     BOOL isWeb = url.host.length > 0 && ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]);
     self.pendingURL = isWeb ? url : nil;
-    self.openButton.hidden = !isWeb;
+    self.openButton.hidden = !isWeb || self.mode != ScanModeCode;
 }
 
 - (void)openLink {
